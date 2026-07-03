@@ -1,36 +1,116 @@
-# Plan: fexp_panel2_parquet
+# Plan: plfrets — Barra factor returns via lazy WLS
 
-## Goal
-Create notebook `fexp_panel2_parquet.ipynb` that reads SAS v9 dataset
-`Y:\sasdata\barra\gem4us\fexp_panel.sas7bdat`, keeps rows where
-`aci_us = 1 OR aci_usmc = 1`, and writes filtered output to `./parquet_files/`.
+## Overview
 
-## Why the earlier search hung
-Initial repo-wide glob/grep scanned `.venv` recursively (large tree). Use targeted
-listing or exclude `.venv` for this small project.
+Two-step pipeline: extract US/USMC names from SAS to Parquet, then run monthly
+cross-sectional WLS factor regressions on the Parquet panel.
+
+| Step | Notebook | Input | Output |
+|------|----------|-------|--------|
+| 1 | `fexp_panel2_parquet.ipynb` | SAS `fexp_panel.sas7bdat` | `./parquet_files/fexp_panel.parquet` |
+| 2 | `plfrets.ipynb` | `./parquet_files/fexp_panel.parquet` | Monthly betas + fit stats |
 
 ## Environment (uv)
-- Project managed with `uv`; dependencies in `pyproject.toml`.
-- Add `pyreadstat` for SAS v9 (`.sas7bdat`) reads.
-- Existing: `polars`, `ipykernel`, `parquet`.
 
-## Approach
-1. **Load strategy**: SAS files do not support predicate pushdown like Parquet.
-   Use manual `row_offset` / `row_limit` reads with
-   `read_sas7bdat(..., output_format="polars")` (not `read_file_in_chunks`, which
-   still probes metadata via pandas).
-2. **Filter**: `(aci_us == 1) | (aci_usmc == 1)` on each chunk (Polars).
-3. **Write**: Concat filtered chunks; `write_parquet()` to `./parquet_files/fexp_panel.parquet`.
-4. **Paths**: Create `parquet_files/` if missing (already gitignored).
+- Managed with `uv`; deps in `pyproject.toml`.
+- Core: `polars`, `polars-ols`, `ipykernel`, `pyreadstat`.
 
-## Notebook cells
-1. Markdown — purpose and inputs/outputs
-2. Config — paths, chunk size
-3. Chunked read → filter → write parquet
-4. Quick validation — row count, schema, sample rows
+---
 
-## Status
-- [x] Plan documented
-- [x] Add `pyreadstat` via `uv add` (polars pinned to 1.42.0 for `exclude-newer`)
-- [x] Create `fexp_panel2_parquet.ipynb`
-- [x] Smoke-check imports (`uv run python -c "import pyreadstat, polars"`)
+## Phase 1: SAS → Parquet ✅
+
+**Goal:** Keep rows where `aci_us = 1 OR aci_usmc = 1`.
+
+**Approach:**
+- Chunked SAS read via `read_sas7bdat(..., output_format="polars")`.
+- Avoid `read_file_in_chunks` (metadata probe requires pandas).
+- Write `./parquet_files/fexp_panel.parquet`.
+
+**Status:** Done — see `fexp_panel2_parquet.ipynb`.
+
+---
+
+## Phase 2: Monthly WLS factor regressions
+
+**Goal:** Turn `plfrets.py` into `plfrets.ipynb` — lazy Polars WLS of `ret` on
+Barra style + industry factors, one regression per `date` (month).
+
+### Input
+
+`./parquet_files/fexp_panel.parquet` (~1.2M rows after Phase 1 filter; all
+`country_gem4 = "USA"` in current extract).
+
+### Row filters (lazy, predicate pushdown)
+
+1. `country_gem4 == "USA"` — placeholder for pushdown filters (no-op on current file).
+2. Future filters can be added here without changing downstream logic.
+
+### Regression weight
+
+`regwt = 1 / srisk^2`
+
+### Dependent variable
+
+`ret`
+
+### Independent variables (56 total, no intercept)
+
+**Style / risk factors (11):**
+
+`WORLD`, `BETA`, `BTOP`, `DIVYILD`, `EARNQLTY`, `EARNVAR`, `EARNYILD`,
+`GROWTH`, `INVSQLTY`, `LEVERAGE`, `LIQUIDTY`
+
+**Industry factors (45):**
+
+`AEROSPCE`, `AIRLINES`, `DIVMETAL`, `AUTOCOMP`, `BANKS`, `BIOTECH`, `BLDCNSTR`,
+`CHEMICAL`, `COMMSVCS`, `COMMUNIC`, `COMPUTER`, `CONSTPP`, `CONSDUR`, `CONSVCS`,
+`DIVFIN`, `ENERGY`, `AGROCHEM`, `FOODPRD`, `FOODRETL`, `GOLD`, `HLTHEQP`,
+`HLTHSVC`, `HSHLDPRD`, `INOILGAS`, `INSURNCE`, `INTERNET`, `SOFTWARE`,
+`MACHINRY`, `MEDIA`, `OILGAS`, `OILEXPL`, `PHARMA`, `PRECMETL`, `REALEST`,
+`RETAIL`, `SEMICOND`, `SMICNDEQ`, `STEEL`, `TELECOM`, `TRNSPORT`, `UTILITY`,
+`CAPMRKTS`, `RGNLBNKS`, `THRIFTS`, `RLESTMNG`
+
+**No intercept:** `WORLD` is 1 for all names and serves as the implicit intercept.
+
+**Excluded style columns** present in Parquet but not in this model:
+`LTREVRSL`, `MIDCAP`, `MOMENTUM`, `PROFIT`, `RESVOL`, `SIZE`.
+
+### Grouping
+
+`group_by("date")` — one cross-section per month (~379 months in sample).
+
+### WLS implementation
+
+- `polars_ols` via `pl.col("ret").least_squares.wls(...)`.
+- `add_intercept=False`, `null_policy="drop"`, `solve_method="svd"`.
+- **Betas:** `mode="coefficients"` → struct unnested to one column per factor.
+- **Summary stats:** `mode="statistics"` panics on this rank-deficient Barra
+  design matrix; instead compute per month:
+  - `n_obs` — row count
+  - `sse` — Σ regwt × residual² (`mode="residuals"`)
+  - `tss` — Σ regwt × (ret − weighted_mean(ret))²
+  - `r2` — 1 − sse/tss
+
+### Output shape
+
+One row per `date` with columns:
+
+- `date`, `n_obs`, `sse`, `tss`, `r2`
+- 56 beta columns (factor names)
+
+Optional: write results to `./parquet_files/fexp_wls_betas.parquet`.
+
+### Notebook cells
+
+1. Markdown — model spec
+2. Config — paths, factor name lists
+3. Build lazy query graph
+4. Collect, unnest betas, preview
+5. Optional save + sanity checks
+
+### Status
+
+- [x] Factor lists confirmed with user
+- [x] Pipeline smoke-tested (379 months, 56 betas)
+- [x] Create `plfrets.ipynb`
+- [x] Align `plfrets.py` reference script

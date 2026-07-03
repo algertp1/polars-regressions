@@ -1,45 +1,117 @@
+"""Monthly Barra factor WLS — lazy Polars reference script."""
+
+from pathlib import Path
+
 import polars as pl
-import polars_ols as pls  # Registers the .least_squares namespace
+import polars_ols  # noqa: F401 — registers .least_squares namespace
 
-# 1. Lazily scan the parquet file (no data is loaded yet)
-lazy_plan = (
-    pl.scan_parquet("your_data.parquet")
-    # 2. Apply your row filter early (Predicate Pushdown)
-    .filter(pl.col("your_filter_column") == "some_value")
-    # 3. Compute your weights lazily on the fly
-    .with_columns(
-        (1.0 / pl.col("idio_variance")).alias("wts")
+PARQUET_PATH = Path("parquet_files/fexp_panel.parquet")
+OUTPUT_PATH = Path("parquet_files/fexp_wls_betas.parquet")
+
+RISK_FACTORS = [
+    "WORLD",
+    "BETA",
+    "BTOP",
+    "DIVYILD",
+    "EARNQLTY",
+    "EARNVAR",
+    "EARNYILD",
+    "GROWTH",
+    "INVSQLTY",
+    "LEVERAGE",
+    "LIQUIDTY",
+]
+
+INDUSTRY_FACTORS = [
+    "AEROSPCE",
+    "AIRLINES",
+    "DIVMETAL",
+    "AUTOCOMP",
+    "BANKS",
+    "BIOTECH",
+    "BLDCNSTR",
+    "CHEMICAL",
+    "COMMSVCS",
+    "COMMUNIC",
+    "COMPUTER",
+    "CONSTPP",
+    "CONSDUR",
+    "CONSVCS",
+    "DIVFIN",
+    "ENERGY",
+    "AGROCHEM",
+    "FOODPRD",
+    "FOODRETL",
+    "GOLD",
+    "HLTHEQP",
+    "HLTHSVC",
+    "HSHLDPRD",
+    "INOILGAS",
+    "INSURNCE",
+    "INTERNET",
+    "SOFTWARE",
+    "MACHINRY",
+    "MEDIA",
+    "OILGAS",
+    "OILEXPL",
+    "PHARMA",
+    "PRECMETL",
+    "REALEST",
+    "RETAIL",
+    "SEMICOND",
+    "SMICNDEQ",
+    "STEEL",
+    "TELECOM",
+    "TRNSPORT",
+    "UTILITY",
+    "CAPMRKTS",
+    "RGNLBNKS",
+    "THRIFTS",
+    "RLESTMNG",
+]
+
+FACTOR_COLUMNS = RISK_FACTORS + INDUSTRY_FACTORS
+
+
+def wls_expr(mode: str) -> pl.Expr:
+    return pl.col("ret").least_squares.wls(
+        *[pl.col(name) for name in FACTOR_COLUMNS],
+        sample_weights=pl.col("regwt"),
+        add_intercept=False,
+        null_policy="drop",
+        solve_method="svd",
+        mode=mode,
     )
-    # 4. Group by your temporal dimension
-    .group_by("month")
-    .agg(
-        # Extract the coefficients per month
-        pl.col("y").least_squares.wls(
-            pl.col("x1"), pl.col("x2"), pl.col("x3"), # Add your independent variables
-            sample_weights=pl.col("wts"),
-            add_intercept=True,
-            mode="coefficients" # Returns a struct of the beta coefficients
-        ).alias("betas"),
-        
-        # Extract the R-squared or Fit Metrics per month
-        pl.col("y").least_squares.wls(
-            pl.col("x1"), pl.col("x2"), pl.col("x3"),
-            sample_weights=pl.col("wts"),
-            add_intercept=True,
-            mode="summary" # Returns a struct containing R2, SSE, TSS, etc.
-        ).alias("stats")
+
+
+def build_lazy_wls_plan(parquet_path: Path = PARQUET_PATH) -> pl.LazyFrame:
+    weighted_mean_ret = (pl.col("ret") * pl.col("regwt")).sum() / pl.col("regwt").sum()
+
+    return (
+        pl.scan_parquet(parquet_path)
+        .filter(pl.col("country_gem4") == "USA")
+        .with_columns((1.0 / pl.col("srisk").pow(2)).alias("regwt"))
+        .group_by("date")
+        .agg(
+            pl.len().alias("n_obs"),
+            wls_expr("coefficients").alias("betas"),
+            (pl.col("regwt") * wls_expr("residuals").pow(2)).sum().alias("sse"),
+            (pl.col("regwt") * (pl.col("ret") - weighted_mean_ret).pow(2))
+            .sum()
+            .alias("tss"),
+        )
+        .with_columns((1.0 - pl.col("sse") / pl.col("tss")).alias("r2"))
+        .sort("date")
     )
-)
 
-# 5. Execute the entire optimized query graph at once
-results_df = lazy_plan.collect()
 
-# 6 convert to normal df
-final_flat_df = (
-    results_df
-    .unnest("betas")
-    .unnest("stats")
-    .sort("month")
-)
+def main() -> pl.DataFrame:
+    results = build_lazy_wls_plan().collect()
+    flat = results.unnest("betas")
+    flat.write_parquet(OUTPUT_PATH)
+    return flat
 
-shape(final_flat_df)
+
+if __name__ == "__main__":
+    df = main()
+    print(f"Wrote {df.height:,} monthly regressions to {OUTPUT_PATH.resolve()}")
