@@ -29,6 +29,12 @@ RISK_FACTORS = [
     "INVSQLTY",
     "LEVERAGE",
     "LIQUIDTY",
+    "LTREVRSL",
+    "MIDCAP",
+    "MOMENTUM",
+    "PROFIT",
+    "RESVOL",
+    "SIZE",
 ]
 
 INDUSTRY_FACTORS = [
@@ -132,66 +138,24 @@ def build_lazy_wls_plan(
     return plan
 
 
-def build_extra_plot_factor_betas(
-    factors: list[str],
-    parquet_path: Path = PARQUET_PATH,
-) -> pl.LazyFrame:
-    """Single-factor WLS per month for style factors outside the main model."""
-    agg_exprs = [
-        wls_expr([factor], "coefficients", add_intercept=True)
-        .struct.field(factor)
-        .alias(factor)
-        for factor in factors
-    ]
-    return (
-        pl.scan_parquet(parquet_path)
-        .filter(pl.col("country_gem4") == "USA")
-        .with_columns((1.0 / pl.col("srisk").pow(2)).alias("regwt"))
-        .group_by("date")
-        .agg(*agg_exprs)
-        .sort("date")
-    )
-
-
-def risk_factor_summary(monthly_betas: pl.DataFrame) -> pl.DataFrame:
-    """Mean and annualized Sharpe (sqrt(12) * mean / stdev) for style-factor betas."""
-    return (
-        monthly_betas.select(RISK_FACTORS)
-        .unpivot(on=RISK_FACTORS, variable_name="factor", value_name="beta")
-        .group_by("factor")
-        .agg(
-            pl.col("beta").mean().alias("mean"),
-            (pl.col("beta").mean() / pl.col("beta").std() * (12**0.5)).alias("sharpe"),
-        )
-        .sort("factor")
-    )
-
-
 def plot_factor_trailing_returns(
     monthly_betas: pl.DataFrame,
     *,
-    parquet_path: Path = PARQUET_PATH,
     trail_months: int = TRAIL_MONTHS,
 ) -> pl.DataFrame:
-    """Merge main-model and supplemental betas; compute trailing monthly average."""
-    from_model = [f for f in PLOT_FACTORS if f in monthly_betas.columns]
-    extra = [f for f in PLOT_FACTORS if f not in FACTOR_COLUMNS]
-
-    plot_ts = monthly_betas.select(["date", *from_model])
-    if extra:
-        supplemental = build_extra_plot_factor_betas(extra, parquet_path).collect()
-        plot_ts = plot_ts.join(supplemental, on="date", how="full")
-
-    plot_ts = plot_ts.sort("date").select(
-        "date",
-        *[
-            pl.col(f)
-            .rolling_mean(window_size=trail_months, min_samples=trail_months)
-            .alias(f)
-            for f in PLOT_FACTORS
-        ],
+    """Trailing monthly average of WLS betas from the main regression."""
+    return (
+        monthly_betas.sort("date")
+        .select(
+            "date",
+            *[
+                pl.col(f)
+                .rolling_mean(window_size=trail_months, min_samples=trail_months)
+                .alias(f)
+                for f in PLOT_FACTORS
+            ],
+        )
     )
-    return plot_ts
 
 
 def main(*, include_stats: bool = INCLUDE_STATS) -> pl.DataFrame:
