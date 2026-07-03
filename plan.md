@@ -1,4 +1,4 @@
-# Plan: plfrets — Barra factor returns via lazy WLS
+# Plan: Barra_frets — Barra factor returns via lazy WLS
 
 ## Overview
 
@@ -8,7 +8,7 @@ cross-sectional WLS factor regressions on the Parquet panel.
 | Step | Notebook | Input | Output |
 |------|----------|-------|--------|
 | 1 | `fexp_panel2_parquet.ipynb` | SAS `fexp_panel.sas7bdat` | `./parquet_files/fexp_panel.parquet` |
-| 2 | `plfrets.ipynb` | `./parquet_files/fexp_panel.parquet` | Monthly betas + fit stats |
+| 2 | `Barra_frets.ipynb` | `./parquet_files/fexp_panel.parquet` | Monthly betas + fit stats |
 
 ## Environment (uv)
 
@@ -32,8 +32,8 @@ cross-sectional WLS factor regressions on the Parquet panel.
 
 ## Phase 2: Monthly WLS factor regressions
 
-**Goal:** Turn `plfrets.py` into `plfrets.ipynb` — lazy Polars WLS of `ret` on
-Barra style + industry factors, one regression per `date` (month).
+**Goal:** `Barra_frets.ipynb` (+ `Barra_frets.py` reference script) — lazy Polars
+WLS of `ret` on Barra style + industry factors, one regression per `date` (month).
 
 ### Input
 
@@ -84,12 +84,9 @@ Barra style + industry factors, one regression per `date` (month).
 - `polars_ols` via `pl.col("ret").least_squares.wls(...)`.
 - `add_intercept=False`, `null_policy="drop"`, `solve_method="svd"`.
 - **Betas:** `mode="coefficients"` → struct unnested to one column per factor.
-- **Summary stats:** `mode="statistics"` panics on this rank-deficient Barra
-  design matrix; instead compute per month:
-  - `n_obs` — row count
-  - `sse` — Σ regwt × residual² (`mode="residuals"`)
-  - `tss` — Σ regwt × (ret − weighted_mean(ret))²
-  - `r2` — 1 − sse/tss
+- **Summary stats:** optional (`INCLUDE_STATS=False` by default). When enabled,
+  compute `sse`, `tss`, `r2` via a second WLS residuals pass (~2× regression time).
+  `mode="statistics"` panics on this design matrix.
 
 ### Output shape
 
@@ -112,5 +109,5 @@ Optional: write results to `./parquet_files/fexp_wls_betas.parquet`.
 
 - [x] Factor lists confirmed with user
 - [x] Pipeline smoke-tested (379 months, 56 betas)
-- [x] Create `plfrets.ipynb`
-- [x] Align `plfrets.py` reference script
+- [x] Create `Barra_frets.ipynb`
+- [x] Align `Barra_frets.py` reference script
