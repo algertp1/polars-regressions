@@ -27,8 +27,8 @@ The project demonstrates two ideas:
 
 Phase 2 runs one multivariate WLS per month (`ret` on 17 style + 45 industry
 factors). Phase 3 runs 17 industry-controlled univariate regressions per month
-(`ret ~ risk_factor + industries`). On the sample panel (~379 months), Phase 2
-takes ~8 seconds; Phase 3 takes ~22 seconds — not ~17× slower.
+(`ret ~ risk_factor + industries`). On the sample panel (~378 months), Phase 2
+takes ~8 seconds; Phase 3 takes ~26 seconds — not ~17× slower.
 
 ## Quick start
 
@@ -95,6 +95,43 @@ All integrate with lazy Polars: expressions inside `group_by().agg()` participat
 in the same optimized plan as the rest of the pipeline. That makes it practical
 to swap weighting or add regularization without restructuring the workflow.
 
+## Performance benchmark
+
+`benchmark_sklearn.py` times three implementations against the same data
+(378 months, 1.2 M rows, best-of-3 runs on Windows/Python 3.14).
+
+### Multivariate — 1 regression × 62 features per month
+
+| Implementation | Time | vs polars |
+|----------------|-----:|----------:|
+| polars-ols lazy | 8.15 s | 1.0× |
+| pandas + numpy `lstsq` | 11.18 s | 1.4× |
+| pandas + sklearn `LinearRegression` | 11.99 s | 1.5× |
+| pandas full pipeline ¹ | 11.99 s | 1.5× |
+
+### Univariate — 17 regressions × 46 features per month (Phase 3)
+
+| Implementation | Time | vs polars | scaling from multivariate |
+|----------------|-----:|----------:|--------------------------:|
+| polars-ols lazy | 26.40 s | 1.0× | 3.2× |
+| pandas + numpy nested | 111.63 s | 4.2× | 10.0× |
+| pandas + sklearn nested | 122.55 s | 4.6× | 10.2× |
+| pandas full pipeline ¹ | 112.34 s | 4.3× | — |
+
+Polars scales sub-linearly (3.2×) because all 17 WLS expressions share
+one lazy DAG — single parquet scan, single filter, single `group_by`.
+Numpy and sklearn scale ~10× (not 17×) because multi-threaded LAPACK
+absorbs some of the per-call cost, but Python's GIL serializes the 6,426
+dispatch calls per run regardless.
+
+> ¹ **"Full pipeline"** re-reads the parquet file inside the timed block.
+> For polars the I/O is already fused into the lazy plan and therefore
+> included in every timed run. The pandas approaches pre-load into a
+> DataFrame and time only the regression loop, which understates
+> end-to-end cost. The full-pipeline variant gives a like-for-like
+> comparison and shows that at 17 regressions/month the I/O cost
+> (< 1 s) is negligible relative to 6,426 LAPACK calls.
+
 ## Repository layout
 
 | File | Purpose |
@@ -102,6 +139,7 @@ to swap weighting or add regularization without restructuring the workflow.
 | `fexp_panel2_parquet.ipynb` | SAS → filtered parquet (run first) |
 | `barra_frets.ipynb` | Lazy WLS frets, summary, charts |
 | `barra_frets.py` | Reference script for multivariate WLS |
+| `benchmark_sklearn.py` | polars vs numpy vs sklearn timing (multivariate + univariate) |
 | `plan.md` | Detailed model spec and pipeline notes |
 | `parquet_files/` | Generated parquet outputs (gitignored) |
 
