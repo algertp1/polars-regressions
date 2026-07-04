@@ -132,6 +132,24 @@ dispatch calls per run regardless.
 > comparison and shows that at 17 regressions/month the I/O cost
 > (< 1 s) is negligible relative to 6,426 LAPACK calls.
 
+### Memory — peak RSS (end-to-end, fresh process)
+
+`benchmark_memory.py` measures peak resident set size for the same
+workloads (378 months, 1.2 M rows, including parquet read).
+
+| Implementation | Multivariate | Univariate | vs polars (multi) |
+|----------------|-------------:|-----------:|------------------:|
+| polars-ols lazy | 1,356 MB | 1,683 MB | 1.0× |
+| pandas + numpy | 2,478 MB | 2,450 MB | 1.8× |
+| pandas + sklearn | 2,525 MB | 2,519 MB | 1.9× |
+
+Polars uses ~40% less RAM because it never materializes a full pandas
+DataFrame — data stays columnar through the lazy scan and `group_by`.
+The panel (~1.2 M rows × 65+ columns) dominates memory for pandas paths;
+numpy vs sklearn differ by less than 50 MB. Univariate adds only ~24%
+more RAM for polars (shared scan/group boundary) and is essentially flat
+for pandas (the DataFrame is already the bottleneck).
+
 ## Repository layout
 
 | File | Purpose |
@@ -140,6 +158,7 @@ dispatch calls per run regardless.
 | `barra_frets.ipynb` | Lazy WLS frets, summary, charts |
 | `barra_frets.py` | Reference script for multivariate WLS |
 | `benchmark_sklearn.py` | polars vs numpy vs sklearn timing (multivariate + univariate) |
+| `benchmark_memory.py` | peak RSS comparison for the same workloads |
 | `plan.md` | Detailed model spec and pipeline notes |
 | `parquet_files/` | Generated parquet outputs (gitignored) |
 
