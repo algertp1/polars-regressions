@@ -53,6 +53,46 @@ Alternatively, open the notebooks in **Cursor** or **VS Code** if you have the
 **Python** and **Jupyter** extensions installed. Select the project venv as the
 kernel (`plfrets (.venv)`) before running cells.
 
+#### Running on Linux
+
+**Phases 2 and 3** (`barra_frets.ipynb`, `barra_frets.py`, benchmarks) use
+relative paths under `parquet_files/` and need no changes on Linux.
+
+**Phase 1** (`fexp_panel2_parquet.ipynb`) defaults to a Windows SAS path:
+
+```python
+SAS_PATH = Path(r"Y:\sasdata\barra\gem4us\fexp_panel.sas7bdat")
+```
+
+On Linux, edit `SAS_PATH` to wherever that dataset is mounted, for example
+`/mnt/sasdata/barra/gem4us/fexp_panel.sas7bdat`. Or build the parquet on
+Windows once and copy `parquet_files/fexp_panel.parquet` to Linux — then skip
+Phase 1 entirely.
+
+**Easiest way to run on Linux:** from the repo root, use the command line —
+no kernel registration and no IDE config required:
+
+```bash
+uv sync
+uv run jupyter lab
+```
+
+`uv run` activates the project `.venv` automatically; JupyterLab uses that
+interpreter for all notebooks.
+
+**Cursor / VS Code on Linux:** the committed `.vscode/settings.json` points
+at the Windows venv layout (`.venv/Scripts/python.exe`). Either use
+**Python: Select Interpreter** and choose `.venv/bin/python`, or update the
+workspace setting:
+
+```json
+"python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python"
+```
+
+After `uv sync`, that interpreter is enough for the Jupyter extension — you
+do not need a separate `ipykernel install` step unless you want a named kernel
+in a shared JupyterHub outside this repo.
+
 ### 2. Build the parquet panel (first time, ~few minutes)
 
 Open and run **`fexp_panel2_parquet.ipynb`**.
