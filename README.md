@@ -40,8 +40,18 @@ Requires Python 3.14+. Dependencies are managed with [uv](https://docs.astral.sh
 uv sync
 ```
 
-Select the project venv as the Jupyter kernel (`plfrets (.venv)`) before running
-notebooks.
+JupyterLab is included in the project dependencies. Run notebooks from the
+command line:
+
+```powershell
+uv run jupyter lab
+```
+
+Then open `fexp_panel2_parquet.ipynb` or `barra_frets.ipynb` in the browser.
+
+Alternatively, open the notebooks in **Cursor** or **VS Code** if you have the
+**Python** and **Jupyter** extensions installed. Select the project venv as the
+kernel (`plfrets (.venv)`) before running cells.
 
 ### 2. Build the parquet panel (first time, ~few minutes)
 
