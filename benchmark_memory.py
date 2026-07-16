@@ -1,4 +1,4 @@
-"""Peak RSS comparison: polars vs numpy vs sklearn WLS (multivariate + univariate)."""
+"""Peak RSS comparison: polars + sklearn vs pandas + sklearn WLS."""
 
 from __future__ import annotations
 
@@ -24,33 +24,12 @@ WORKER_HEADER = textwrap.dedent("""
 
 WORKERS: dict[str, str] = {
     "polars_multi": WORKER_HEADER + textwrap.dedent("""
-        import polars_ols  # noqa: F401
-        from barra_frets import build_lazy_wls_plan
+        from barra_frets import run_multivariate_wls
         gc.collect(); tick()
-        build_lazy_wls_plan().collect().unnest("betas")
+        run_multivariate_wls()
         tick(); report()
     """),
-    "numpy_multi": WORKER_HEADER + textwrap.dedent("""
-        import numpy as np
-        import pandas as pd
-        from barra_frets import FACTOR_COLUMNS, PARQUET_PATH
-        gc.collect(); tick()
-        df = (
-            pd.read_parquet(PARQUET_PATH)
-            .query("country_gem4 == 'USA'")
-            .dropna(subset=["ret", "srisk", *FACTOR_COLUMNS])
-        )
-        df["regwt"] = 1.0 / df["srisk"] ** 2
-        tick()
-        for _, grp in df.groupby("date"):
-            X = grp[FACTOR_COLUMNS].values
-            y = grp["ret"].values
-            sw = np.sqrt(grp["regwt"].values)
-            np.linalg.lstsq(X * sw[:, None], y * sw, rcond=None)
-            tick()
-        report()
-    """),
-    "sklearn_multi": WORKER_HEADER + textwrap.dedent("""
+    "pandas_multi": WORKER_HEADER + textwrap.dedent("""
         import pandas as pd
         from sklearn.linear_model import LinearRegression
         from barra_frets import FACTOR_COLUMNS, PARQUET_PATH
@@ -73,39 +52,20 @@ WORKERS: dict[str, str] = {
         report()
     """),
     "polars_uni": WORKER_HEADER + textwrap.dedent("""
-        import polars_ols  # noqa: F401
-        from barra_frets import build_lazy_univariate_wls_plan
+        from barra_frets import run_univariate_wls
         gc.collect(); tick()
-        build_lazy_univariate_wls_plan().collect()
+        run_univariate_wls()
         tick(); report()
     """),
-    "numpy_uni": WORKER_HEADER + textwrap.dedent("""
-        import numpy as np
-        import pandas as pd
-        from barra_frets import FACTOR_COLUMNS, PARQUET_PATH, RISK_FACTORS, INDUSTRY_FACTORS
-        gc.collect(); tick()
-        df = (
-            pd.read_parquet(PARQUET_PATH)
-            .query("country_gem4 == 'USA'")
-            .dropna(subset=["ret", "srisk", *FACTOR_COLUMNS])
-        )
-        df["regwt"] = 1.0 / df["srisk"] ** 2
-        features = {f: [f, *INDUSTRY_FACTORS] for f in RISK_FACTORS}
-        tick()
-        for _, grp in df.groupby("date"):
-            y = grp["ret"].values
-            sw = np.sqrt(grp["regwt"].values)
-            yw = y * sw
-            for cols in features.values():
-                X = grp[cols].values
-                np.linalg.lstsq(X * sw[:, None], yw, rcond=None)
-            tick()
-        report()
-    """),
-    "sklearn_uni": WORKER_HEADER + textwrap.dedent("""
+    "pandas_uni": WORKER_HEADER + textwrap.dedent("""
         import pandas as pd
         from sklearn.linear_model import LinearRegression
-        from barra_frets import FACTOR_COLUMNS, PARQUET_PATH, RISK_FACTORS, INDUSTRY_FACTORS
+        from barra_frets import (
+            FACTOR_COLUMNS,
+            INDUSTRY_FACTORS,
+            PARQUET_PATH,
+            RISK_FACTORS,
+        )
         gc.collect(); tick()
         df = (
             pd.read_parquet(PARQUET_PATH)

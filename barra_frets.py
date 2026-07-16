@@ -1,15 +1,17 @@
-"""Barra_frets — monthly Barra factor WLS via lazy Polars.
+"""Barra_frets — monthly Barra factor WLS via Polars I/O and sklearn WLS.
 
-Reference script companion to ``Barra_frets.ipynb``. Reads
-``parquet_files/fexp_panel.parquet`` and runs cross-sectional WLS by date.
+Reference script companion to ``barra_frets.ipynb``. Reads
+``parquet_files/fexp_panel.parquet``, prepares the panel with lazy Polars,
+and runs cross-sectional weighted least squares by ``date`` using scikit-learn.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import polars as pl
-import polars_ols  # noqa: F401 — registers .least_squares namespace
+from sklearn.linear_model import LinearRegression
 
 PARQUET_PATH = Path("parquet_files/fexp_panel.parquet")
 OUTPUT_PATH = Path("parquet_files/fexp_wls_betas.parquet")
@@ -102,50 +104,17 @@ SUMMARY_FACTORS = [
 FACTOR_COLUMNS = RISK_FACTORS + INDUSTRY_FACTORS
 
 
-def wls_expr(features: list[str], mode: str, *, add_intercept: bool = False) -> pl.Expr:
-    return pl.col("ret").least_squares.wls(
-        *[pl.col(name) for name in features],
-        sample_weights=pl.col("regwt"),
-        add_intercept=add_intercept,
-        null_policy="drop",
-        solve_method="svd",
-        mode=mode,
-    )
-
-
-def build_lazy_wls_plan(
-    parquet_path: Path = PARQUET_PATH,
+def wls_coefficients(
+    X: np.ndarray,
+    y: np.ndarray,
+    sample_weight: np.ndarray,
     *,
-    include_stats: bool = INCLUDE_STATS,
-) -> pl.LazyFrame:
-    """Build the Barra_frets lazy WLS query (one regression per ``date``)."""
-    weighted_mean_ret = (pl.col("ret") * pl.col("regwt")).sum() / pl.col("regwt").sum()
-
-    agg_exprs: list[pl.Expr] = [
-        pl.len().alias("n_obs"),
-        wls_expr(FACTOR_COLUMNS, "coefficients").alias("betas"),
-    ]
-    if include_stats:
-        agg_exprs.extend(
-            [
-                (pl.col("regwt") * wls_expr(FACTOR_COLUMNS, "residuals").pow(2))
-                .sum()
-                .alias("sse"),
-                (pl.col("regwt") * (pl.col("ret") - weighted_mean_ret).pow(2))
-                .sum()
-                .alias("tss"),
-            ]
-        )
-
-    plan = (
-        _scan_regression_panel(parquet_path)
-        .group_by("date")
-        .agg(*agg_exprs)
-        .sort("date")
-    )
-    if include_stats:
-        plan = plan.with_columns((1.0 - pl.col("sse") / pl.col("tss")).alias("r2"))
-    return plan
+    model: LinearRegression | None = None,
+) -> np.ndarray:
+    """Fit weighted least squares (no intercept) and return coefficients."""
+    reg = model if model is not None else LinearRegression(fit_intercept=False)
+    reg.fit(X, y, sample_weight=sample_weight)
+    return reg.coef_
 
 
 def _scan_regression_panel(parquet_path: Path = PARQUET_PATH) -> pl.LazyFrame:
@@ -156,27 +125,79 @@ def _scan_regression_panel(parquet_path: Path = PARQUET_PATH) -> pl.LazyFrame:
     )
 
 
-def univariate_risk_beta_expr(risk_factor: str) -> pl.Expr:
-    """WLS beta for one risk factor with industry controls."""
-    features = [risk_factor, *INDUSTRY_FACTORS]
+def load_regression_panel(parquet_path: Path = PARQUET_PATH) -> pl.DataFrame:
+    """Load filtered exposure panel with regression weights (lazy scan + collect)."""
+    subset = ["ret", "srisk", *FACTOR_COLUMNS]
+    return _scan_regression_panel(parquet_path).drop_nulls(subset=subset).collect()
+
+
+def _fit_multivariate_group(
+    group: pl.DataFrame,
+    *,
+    include_stats: bool = False,
+) -> pl.DataFrame:
+    subset = ["ret", "regwt", *FACTOR_COLUMNS]
+    clean = group.drop_nulls(subset=subset)
+    date = group["date"][0]
+    n_obs = clean.height
+    X = clean.select(FACTOR_COLUMNS).to_numpy()
+    y = clean["ret"].to_numpy()
+    w = clean["regwt"].to_numpy()
+    model = LinearRegression(fit_intercept=False)
+    coef = wls_coefficients(X, y, w, model=model)
+    row: dict = {"date": date, "n_obs": n_obs}
+    row.update(dict(zip(FACTOR_COLUMNS, coef, strict=True)))
+    if include_stats:
+        resid = y - X @ coef
+        sse = float(np.sum(w * resid**2))
+        wmean = float(np.sum(w * y) / np.sum(w))
+        tss = float(np.sum(w * (y - wmean) ** 2))
+        row.update(sse=sse, tss=tss, r2=(1.0 - sse / tss if tss else float("nan")))
+    return pl.DataFrame([row])
+
+
+def run_multivariate_wls(
+    parquet_path: Path = PARQUET_PATH,
+    *,
+    include_stats: bool = INCLUDE_STATS,
+    panel: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """Run multivariate monthly WLS (one regression per ``date``)."""
+    data = panel if panel is not None else load_regression_panel(parquet_path)
     return (
-        wls_expr(features, "coefficients")
-        .struct.field(risk_factor)
-        .alias(risk_factor)
+        data.group_by("date", maintain_order=True)
+        .map_groups(lambda g: _fit_multivariate_group(g, include_stats=include_stats))
+        .sort("date")
     )
 
 
-def build_lazy_univariate_wls_plan(
+def _fit_univariate_group(group: pl.DataFrame) -> pl.DataFrame:
+    subset = ["ret", "regwt", *FACTOR_COLUMNS]
+    clean = group.drop_nulls(subset=subset)
+    date = group["date"][0]
+    n_obs = clean.height
+    y = clean["ret"].to_numpy()
+    w = clean["regwt"].to_numpy()
+    model = LinearRegression(fit_intercept=False)
+    row: dict = {"date": date, "n_obs": n_obs}
+    for factor in RISK_FACTORS:
+        cols = [factor, *INDUSTRY_FACTORS]
+        X = clean.select(cols).to_numpy()
+        model.fit(X, y, sample_weight=w)
+        row[factor] = model.coef_[0]
+    return pl.DataFrame([row])
+
+
+def run_univariate_wls(
     parquet_path: Path = PARQUET_PATH,
-) -> pl.LazyFrame:
-    """Build lazy WLS plan: one industry-controlled regression per risk factor per date."""
+    *,
+    panel: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """Run industry-controlled univariate WLS (17 regressions per ``date``)."""
+    data = panel if panel is not None else load_regression_panel(parquet_path)
     return (
-        _scan_regression_panel(parquet_path)
-        .group_by("date")
-        .agg(
-            pl.len().alias("n_obs"),
-            *[univariate_risk_beta_expr(factor) for factor in RISK_FACTORS],
-        )
+        data.group_by("date", maintain_order=True)
+        .map_groups(_fit_univariate_group)
         .sort("date")
     )
 
@@ -227,15 +248,14 @@ def plot_factor_trailing_returns(
 
 def main(*, include_stats: bool = INCLUDE_STATS) -> pl.DataFrame:
     """Run Barra_frets WLS and write monthly betas to ``OUTPUT_PATH``."""
-    results = build_lazy_wls_plan(include_stats=include_stats).collect()
-    flat = results.unnest("betas")
+    flat = run_multivariate_wls(include_stats=include_stats)
     flat.write_parquet(OUTPUT_PATH)
     return flat
 
 
 def main_univariate() -> pl.DataFrame:
     """Run industry-controlled univariate WLS and write betas to ``UNIVARIATE_OUTPUT_PATH``."""
-    univariate = build_lazy_univariate_wls_plan().collect()
+    univariate = run_univariate_wls()
     univariate.write_parquet(UNIVARIATE_OUTPUT_PATH)
     return univariate
 
